@@ -1,33 +1,37 @@
-# ai2es-template
-This repository is a template for all code repositories in the AI2ES 
-organization. The purpose of this template is to ensure that all 
-code repositories follow the same general structure and are similarly
-laid out. That way new users can easily find files as needed.
+# CIRA-Diffusion
+
+## Introduction 
+This repository is to hold the code for the diffusion model efforts at CIRA-CSU. The first couple projects for us are to do are conditional diffusion models to do image2image translation using satellite data. Specifcally, we are looking to generate Visible images from IR data and Microwave images from the full GOES ABI. 
 
 ## Getting Started
 1. Setup a Python installation on the machine you are using. I
-   recommend installing [Miniconda](https://docs.conda.io/en/latest/miniconda.html) since
-   it requires less memory than the full Anaconda Python distribution. Follow
-   the instructions on the miniconda page to download and install Miniconda
-   for your operating system.
-2. Create a new repository within the [Github AI2ES organization](https://github.com/organizations/ai2es/repositories/new).
-   Under the **Repository Template** section, select ai2es-template from the dropdown menu. Pick a name for
-   your repository and decide whether to make it public or private. Then click
-   **Create Repository** to create the repository site.
-3. On the repository page, copy the appropriate repository path to your clipboard. The HTTPS option
-   works for any setup but requires typing in your username and password whenever you want to pull or push from Github.
-   If you set up a [ssh key with Github](https://docs.github.com/en/github/authenticating-to-github/connecting-to-github-with-ssh),
-   you can securely access the repo from an authenticated machine without having to type
-   your username and password every time.
-4. In a terminal window, clone your repository to your local machine with the command
-`git clone <repo-address>`.
-5. Within the terminal, go to the top-level directory of your repository with cd.
-6. If you do not have a prior ai2es python environment within miniconda, create one from the environment.yml file.
-   Use the command `conda env create -f environment.yml`. Activate the environment by running `conda activate ai2es` or 
-   `source activate ai2es`.
-7. If you already have an ai2es environment (check by typing `conda info --envs`), you can update
-   the environment with changes to the environment.yml file by running `conda env update -f environment.yml`.
-8. Change the name of the `template` directory to the name of your package. Your Python
-   code will go there: `git mv template <packagename>`.
-9. Modify `setup.py` to edit the project name, description, and any other keyword arguments for setup. 
+   recommend installing [Mamba](#). Mamba is the new kid ont he block and tends to solve environments more quickly than conda and miniconda. 
+2. Install a torch env
+   For these diffusion models we leverage the codebase from huggingface called diffusers. Diffusers is a nice bit of code that takes alot of work out of things, like building UNETs, the noise sampling steps, the diffusion scores etc. 
+
+   ``mamba create -n torch``
+   ``mamba install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia``
+
+   if you dont have CUDA 12, change this to one of the 11.8s or something. You can see which CUDA is compiled by running `nvidia-smi` on a node where GPUs are connected. 
+
+3. Install Randy's fork of diffusers
+
+   Randy has altered one of the pipelines to enable conditional diffusion models. So go grab his fork and install from source
+
+   ``git clone https://github.com/dopplerchase/diffusers.git``
+   ``cd diffusers``
+   ``pip install .`` 
+
+4. Install additional packages 
+
+   You will need to get the transformers package if you would like to use attention and transformer methods in your Unets. 
+
+   ``pip install transformers`` 
+   ``pip install accelerate``
+   ``pip install matplotlib``
+   ``pip install tensorboard``
+
+5. Go ahead and train 
+
+   You should be good to go now. So far there are just a couple scripts in there to get you started. 
    
