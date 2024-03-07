@@ -12,6 +12,9 @@ import numpy as np
 import matplotlib.pyplot as plt 
 from diffusers.optimization import get_cosine_schedule_with_warmup
 import torch.nn.functional as F
+import gc
+import os 
+import torch.distributed as dist
 
 
 
@@ -22,14 +25,14 @@ class TrainingConfig:
     noise_steps = 1000 #this was default, and i noticed edges look better with more steps. 
     train_batch_size = 16 #this was the default, might want to increase if you have smaller images. 
     eval_batch_size = 16  # how many images to sample during evaluation
-    num_epochs = 200 #how long to train, this is about where 'convergence' happened and takes 2 hours per epoch on 1 GPU. 
+    num_epochs = 300 #how long to train, this is about where 'convergence' happened and takes 2 hours per epoch on 1 GPU. 
     gradient_accumulation_steps = 1 #
     learning_rate = 1e-4 
     lr_warmup_steps = 500 #not sure if a warmup is needed, but just left it 
     save_image_epochs = 1 #output every epoch, because i want to see progress and my epochs are long 
     save_model_epochs = 1 #same 
     mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision 
-    output_dir = "/scratch/randychase/diffusion_training_V4/"  # the model name locally and on the HF Hub, but i dont use HF hub 
+    output_dir = "/scratch/randychase/diffusion_training_V7/"  # the model name locally and on the HF Hub, but i dont use HF hub 
     push_to_hub = False # whether to upload the saved model to the HF Hub
     hub_private_repo = False
     overwrite_output_dir = True  # overwrite the old model when re-running the notebook
@@ -92,17 +95,17 @@ def evaluate(config, epoch, pipeline):
         ax.set_title('Diffusion Output')
     
         ax = axes[1,i]
-        ax.imshow(condition_sample[i,0,...],cmap='Spectral_r')
+        ax.imshow(condition_sample[i,0,...].cpu(),cmap='Spectral_r')
         ax.axis('off')
         ax.set_title('Diffusion Input IR')
     
         ax = axes[2,i]
-        ax.imshow(condition_sample[i,1,...],cmap='turbo')
+        ax.imshow(condition_sample[i,1,...].cpu(),cmap='turbo')
         ax.axis('off')
         ax.set_title('Diffusion Input Solar Zenith')
 
         ax = axes[3,i]
-        ax.imshow(condition_sample[i,2,...],cmap='turbo')
+        ax.imshow(condition_sample[i,2,...].cpu(),cmap='turbo')
         ax.axis('off')
         ax.set_title('Diffusion Input Relative Azimuth')
 
@@ -112,6 +115,9 @@ def evaluate(config, epoch, pipeline):
     # image_grid.save(f"{test_dir}/{epoch:04d}.png")
     plt.savefig(f"{test_dir}/{epoch:04d}.png",dpi=300)
     plt.close()
+    
+    del fig,axes 
+    
 
 def get_full_repo_name(model_id: str, organization: str = None, token: str = None):
     if token is None:
@@ -151,13 +157,13 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
     
     best_valid_loss = float('inf')  # Initialize best validation loss
     early_stopping_counter = 0  # Counter to track consecutive epochs without improvement
-    early_stopping_patience = 5  # Number of consecutive epochs allowed without improvement before stopping
+    early_stopping_patience = 10  # Number of consecutive epochs allowed without improvement before stopping
     # Now you train the model
     for epoch in range(config.num_epochs):
         progress_bar = tqdm(total=len(train_dataloader), disable=not accelerator.is_local_main_process)
         progress_bar.set_description(f"Epoch {epoch}")
         
-        epoch_loss = 0.0  # Initialize epoch loss
+#         epoch_loss = torch.Tensor([0.0])  # Initialize epoch loss
         
         for step, batch in enumerate(train_dataloader):
             # Add channel dim
@@ -188,39 +194,41 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 
-            epoch_loss += loss.item()  # Accumulate loss for the epoch
+            
+#             epoch_loss += loss.detach().item()  # Accumulate loss for the epoch
+            
+            #accumulate loss across all GPUs 
+#             torch.distributed.all_reduce(loss.to(int(os.environ["RANK"]) % torch.cuda.device_count()),
+#                                                         op=torch.distributed.ReduceOp.AVG).cpu()
             progress_bar.update(1)
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "step": global_step}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             global_step += 1
             
-        # Calculate average epoch loss
-        epoch_loss /= len(train_dataloader)
+        #Devide the accumulated loss by the number of batches
+#         epoch_loss /= len(train_dataloader)
         
         # Print or log the average epoch loss
-        logs = {"epoch_loss": epoch_loss, "epoch": epoch}
-        accelerator.log(logs, step=epoch)
+#         logs = {"epoch_loss": epoch_loss, "epoch": epoch}
+#         accelerator.log(logs, step=epoch)
         
-        # Check if validation loss has decreased
-        if epoch_loss < best_valid_loss:
-            best_valid_loss = epoch_loss
-            early_stopping_counter = 0
-        else:
-            early_stopping_counter += 1
-            
-        # Check if early stopping criteria met
-        if early_stopping_counter >= early_stopping_patience:
-            print("Validation loss hasn't improved for", early_stopping_patience, "epochs. Stopping training.")
-            break
-
-# Here you can also save the best model based on validation loss, if needed
-
-            global_step += 1
+        # Check if va# lidation loss has decreased
+#         if epoch_loss < best_valid_loss:
+#             best_valid_loss = epoch_loss
+#             early_stopping_counter = 0
+#         else:
+#             early_stopping_counter += 1
+#             
+#         # Check if early stopping criteria met
+#         if early_stopping_counter >= early_stopping_patience:
+#             print("Validation loss hasn't improved for", early_stopping_patience, "epochs. Stopping training.")
+#             break
     
         # After each epoch you optionally sample some demo images with evaluate() and save the model
         if accelerator.is_main_process:
-            pipeline = DDPMCondPipeline2(unet=accelerator.unwrap_model(model), scheduler=noise_scheduler)
+        	#force the pipeline to device 0
+            pipeline = DDPMCondPipeline2(unet=accelerator.unwrap_model(model), scheduler=noise_scheduler).to("cuda:0")
             
             if (epoch + 1) % config.save_image_epochs == 0 or epoch == config.num_epochs - 1:
                 evaluate(config, epoch, pipeline)
@@ -230,8 +238,9 @@ def train_loop(config, model, noise_scheduler, optimizer, train_dataloader, lr_s
                     repo.push_to_hub(commit_message=f"Epoch {epoch}", blocking=True)
                 else:
                     pipeline.save_pretrained(config.output_dir)
-
-
+                    
+        gc.collect()
+        
 
 
 #CODE 
@@ -289,7 +298,8 @@ noise_scheduler = DDPMScheduler(num_train_timesteps=config.noise_steps,beta_star
 #isolate a single image, because i need to see things 
 idx_choice = [42,55,100,1025]
 sample = dataset[idx_choice]
-condition_sample = torch.clone(sample[1].moveaxis(-1,1))
+#should this be on the device 0 
+condition_sample = torch.clone(sample[1].moveaxis(-1,1)).to('cuda:0')
 
 
 #left this the same as the example 

@@ -1,6 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=ai2es
-#SBATCH -w c731
+#SBATCH --partition=ai2es_h100
 #SBATCH --gres=gpu:2
 #SBATCH --nodes=1
 #SBATCH --ntasks=10
