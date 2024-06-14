@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from matplotlib import pyplot
 
 #################### \Imports ########################
 
@@ -38,9 +39,9 @@ import numpy as np
 
 @dataclass
 class TrainingConfig:
-    image_size = 256  # the generated image resolution, which is the same size of my training data, note it has to be square. 
+    image_size = 512  # the generated image resolution, which is the same size of my training data, note it has to be square. 
     noise_steps = 1000 #this was default, and i noticed edges look better with more steps. 
-    train_batch_size = 4 #this was the default, might want to increase if you have smaller images. 
+    train_batch_size = 4  #this was the default, might want to increase if you have smaller images. 
     eval_batch_size = 16  # how many images to sample during evaluation
     num_epochs = 500 #how long to train, this is about where 'convergence' happened and takes 2 hours per epoch on 1 GPU. 
     gradient_accumulation_steps = 1 #
@@ -49,7 +50,7 @@ class TrainingConfig:
     save_image_epochs = 1 #output every epoch, because i want to see progress and my epochs are long 
     save_model_epochs = 1 #same 
     mixed_precision = "fp16"  # `no` for float32, `fp16` for automatic mixed precision 
-    output_dir = "/mnt/data1/diffusion_big_run/"  # the model name locally and on the HF Hub, but i dont use HF hub 
+    output_dir = "/mnt/data1/diffusion_scorebased/plots"  # the model name locally and on the HF Hub, but i dont use HF hub 
     push_to_hub = False # whether to upload the saved model to the HF Hub
     hub_private_repo = False
     overwrite_output_dir = True  # overwrite the old model when re-running the notebook
@@ -117,8 +118,8 @@ class EDMPrecond(torch.nn.Module):
         c_noise = sigma.log() / 4
         
         #split out the noisy image 
-        x_noisy = torch.clone(x[:,0:1])
-        x_condition = torch.clone(x[:,1:])
+        x_noisy = torch.clone(x[:,0:3])
+        x_condition = torch.clone(x[:,3:])
         #concatinate back 
         model_input_images = torch.cat([x_noisy*c_in, x_condition], dim=1)
         F_x = self.model((model_input_images).to(dtype), c_noise.flatten(), return_dict=False)[0]
@@ -221,6 +222,18 @@ def edm_sampler(
 
     return x_next
 
+
+class CustomDataset(Dataset):
+  def __init__(self, inputs, outputs):
+    self.inputs = inputs
+    self.outputs = outputs
+  def __len__(self):
+    return len(self.inputs)
+  def __getitem__(self, idx):
+    input_data = self.inputs[idx]
+    output_data = self.outputs[idx]
+    return input_data, output_data
+
 #################### \Funcs ########################
 
 
@@ -232,25 +245,33 @@ def edm_sampler(
 config = TrainingConfig()
 
 #I have an exisiting datafile here 
-output_file = '/mnt/data1/nowcast_G16_V5.pt'
+# output_file = '/mnt/data1/nowcast_G16_V5.pt'
+# dataset = torch.load(output_file)
 
-# Load the saved dataset from disk, this will take a min depending on the size 
-dataset = torch.load(output_file)
+condition_file = '/mnt/overcastnas1/ylee/turbulence/diffuser_tutorial/train_input.pt'
+target_file = '/mnt/overcastnas1/ylee/turbulence/diffuser_tutorial/train_output.pt'
+
+inp = torch.load(condition_file)
+out = torch.load(target_file)
+
+# Instantiate the dataset and dataloader
+dataset = CustomDataset(out, inp)
+train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=False)
 
 #throw it in a dataloader for fast CPU handoffs. 
 #Note, you could add preprocessing steps with image permuations here i think 
-train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=False)
+# train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=False)
 
 ### LOAD YOUR TRAINED MODEL 
-model = UNet2DModel.from_pretrained("/mnt/data1/diffusion_scorebased_residual/").to('cuda')
+model = UNet2DModel.from_pretrained("/mnt/data1/diffusion_scorebased/").to('cuda')
 
 #wrap diffusers/pytorch model 
-model_wrapped = EDMPrecond(256,1,model)
+model_wrapped = EDMPrecond(512,1,model)
 
 #define random noise/seed vectors, here is enough seeds to run one batch of data through (i.e., one image per batch)
 # Pick latents and labels.
 rnd = StackedRandomGenerator('cuda',np.arange(0,config.train_batch_size,1).astype(int).tolist())
-latents = rnd.randn([config.train_batch_size, 1, 256, 256],device='cuda')
+latents = rnd.randn([config.train_batch_size, 3, 512, 512],device='cuda')
 
 #grab a batch of data 
 for step, batch in enumerate(train_dataloader):
@@ -266,10 +287,23 @@ for step, batch in enumerate(train_dataloader):
 #run sampler 
 images_batch = edm_sampler(model_wrapped,latents,condition_images,num_steps=18)
 
+first_image_matrix = images_batch[0, ...].detach().cpu().numpy()
+num_channels = first_image_matrix.shape[0]
+
+for k in range(num_channels):
+    figure_object, axes_object = pyplot.subplots(1, 1, figsize=(15, 15))
+    axes_object.imshow(first_image_matrix[k, ...])
+    
+    output_file_name = '{0:s}/channel{1:d}.jpg'.format(config.output_dir, k)
+    print(output_file_name)
+    figure_object.savefig(
+        output_file_name, dpi=300, pad_inches=0, bbox_inches='tight'
+    )
+    pyplot.close(figure_object)
+
 
 #if you want to do an ensemble for one image 
-ensemble_size = 30
-rnd = StackedRandomGenerator('cuda',np.arange(0,ensemble_size,1).astype(int).tolist())
-latents_ens = rnd.randn([ensemble_size, 1, 256, 256],device='cuda')
-images_ens = edm_sampler(model_wrapped,latents_ens,condition_images[0:1].repeat((ensemble_size,1,1,1)),num_steps=18)
-
+# ensemble_size = 30
+# rnd = StackedRandomGenerator('cuda',np.arange(0,ensemble_size,1).astype(int).tolist())
+# latents_ens = rnd.randn([ensemble_size, 3, 512, 512],device='cuda')
+# images_ens = edm_sampler(model_wrapped,latents_ens,condition_images[0:1].repeat((ensemble_size,1,1,1)),num_steps=18)

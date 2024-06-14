@@ -60,8 +60,8 @@ from diffusers.utils.torch_utils import randn_tensor
 @dataclass
 class TrainingConfig:
     """ This should be probably in some sort of config file, but for now its here... """
-    image_size = 256  # the generated image resolution, which is the same size of my training data, note it has to be square. 
-    train_batch_size = 45 #this was as manny batch,7,256,256 images i could fit in the 95 GB of RAM 
+    image_size = 512  # the generated image resolution, which is the same size of my training data, note it has to be square. 
+    train_batch_size = 8 #this was as manny batch,7,256,256 images i could fit in the 95 GB of RAM 
     num_epochs = 500 #how long to train, this is about where 'convergence' happened and takes 2 hours per epoch on 1 GPU. 
     gradient_accumulation_steps = 1 # I havent gotting this working yet....
     learning_rate = 1e-4 #I am using a learning rate scheduler, not sure this is even used?
@@ -157,9 +157,9 @@ class EDMPrecond(torch.nn.Module):
         c_noise = sigma.log() / 4
         
         #split out the noisy image YOU WILL HAVE TO CHANGE THIS IF YOU WANT TO DO MORE THAN 1 IMAGE PREDICTION 
-        x_noisy = torch.clone(x[:,0:1])
+        x_noisy = torch.clone(x[:,0:3])
         #the condition
-        x_condition = torch.clone(x[:,1:])
+        x_condition = torch.clone(x[:,3:])
         #concatinate back with the scaling applied to the noisy image 
         model_input_images = torch.cat([x_noisy*c_in, x_condition], dim=1)
         #do the model call 
@@ -273,9 +273,11 @@ def train_loop(config, model, optimizer, train_dataloader, lr_scheduler):
             #my data loader returns [clean_images,condition_images],I seperate them here just to be clear 
             # Sep. label 
             clean_images = batch[0]
+            clean_images = (clean_images/65535.)*2.-1
 
             #Sep. conditions
             condition_images = batch[1]
+            condition_images = (condition_images/65535.)*2.-1
             
             #this is the autograd steps within the .accumulate bit (this is important for multi-GPU training)
             with accelerator.accumulate(model):
@@ -369,6 +371,18 @@ def train_loop(config, model, optimizer, train_dataloader, lr_scheduler):
                     
         gc.collect()
 
+
+class CustomDataset(Dataset):
+  def __init__(self, inputs, outputs):
+    self.inputs = inputs
+    self.outputs = outputs
+  def __len__(self):
+    return len(self.inputs)
+  def __getitem__(self, idx):
+    input_data = self.inputs[idx]
+    output_data = self.outputs[idx]
+    return input_data, output_data
+
 #################### \Funcs ########################
 
 #################### CODE ########################
@@ -377,21 +391,30 @@ def train_loop(config, model, optimizer, train_dataloader, lr_scheduler):
 config = TrainingConfig()
 
 #I have an exisiting datafile here 
-output_file = '/mnt/data1/nowcast_G16_V5.pt'
+# output_file = '/mnt/data1/nowcast_G16_V5.pt'
+# dataset = torch.load(output_file)
 
-# Load the saved dataset from disk, this will take a min depending on the size 
-dataset = torch.load(output_file)
+condition_file = '/mnt/overcastnas1/ylee/turbulence/diffuser_tutorial/train_input.pt'
+target_file = '/mnt/overcastnas1/ylee/turbulence/diffuser_tutorial/train_output.pt'
+
+inp = torch.load(condition_file)
+out = torch.load(target_file)
+
+# Instantiate the dataset and dataloader
+dataset = CustomDataset(out, inp)
+train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=True)
 
 #throw it in a dataloader for fast CPU handoffs. 
 #Note, you could add preprocessing steps with image permuations here i think 
-train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=True)
+# train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_batch_size, shuffle=True)
+# train_dataloader = torch.utils.data.DataLoader(tuple([target_dataset, condition_dataset]), batch_size=config.train_batch_size, shuffle=True)
 
 #go ahead and build a UNET, this was the exact same as the butterfly example, but different channels. This is a big model.. 
 # in_channels = noisy_dim + condition_channels. 
 
 model = UNet2DModel(
     sample_size=config.image_size,  # the target image resolution
-    in_channels=7,  # the number of input channels, 3 for RGB images
+    in_channels=9,  # the number of input channels, 3 for RGB images
     out_channels=1,  # the number of output channels
     layers_per_block=2,  # how many ResNet layers to use per UNet block
     block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
